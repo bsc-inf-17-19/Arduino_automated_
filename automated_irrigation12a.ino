@@ -2,13 +2,14 @@
 #include <LiquidCrystal_I2C.h>
 #include <WiFi.h>
 #include <ESPAsyncWebServer.h>
+#include <ArduinoJson.h> // Include ArduinoJson library
 
 // Pin definitions for the ESP32
 const int moistureSensorPin = 34; // Analog pin for the moisture sensor
 
 // Replace with your network credentials
-const char* ssid = "Finalee";
-const char* password = "123456781";
+const char* ssid = "iope";
+const char* password = "123456789/";
 
 // Initialize the I2C LCD
 LiquidCrystal_I2C lcd(0x27, 16, 2); // Set the LCD address to 0x27 for a 16x2 display
@@ -38,8 +39,12 @@ void setup() {
   Serial.println(WiFi.localIP());
 
   // Route to display moisture data
-  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
-    request->send(200, "text/plain", String("Moisture Percentage: ") + String(moisturePercentage) + "%");
+  server.on("/api/moisture", HTTP_GET, [](AsyncWebServerRequest *request){
+    DynamicJsonDocument doc(1024);
+    doc["moisture"] = moisturePercentage;
+    String jsonString;
+    serializeJson(doc, jsonString);
+    request->send(200, "application/json", jsonString); // Moved the closing parenthesis and semicolon here
   });
 
   // Start server
