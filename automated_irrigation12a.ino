@@ -1,6 +1,7 @@
 #include <WiFi.h>
-#include <HTTPClient.h>
 #include <FirebaseESP32.h>
+#include <NTPClient.h>
+#include <WiFiUdp.h>
 #include <ArduinoJson.h>
 
 // Define the pins
@@ -27,56 +28,33 @@ FirebaseConfig config;
 FirebaseAuth auth;
 
 // Variable to store the crop threshold value
-int cropThreshold;
+int cropThreshold = -1;  
 
-// Function to fetch the current time from the World Time API
-String getCurrentTime() {
-  if (WiFi.status() == WL_CONNECTED) { // Check if the device is connected to Wi-Fi
-    HTTPClient http;
-    http.begin("http://worldtimeapi.org/api/timezone/Etc/UTC"); // Specify the URL
-    int httpCode = http.GET(); // Make the GET request
-
-    if (httpCode > 0) { // Check for the returning code
-      String payload = http.getString();
-      http.end();
-
-      // Parse JSON response
-      StaticJsonDocument<1024> jsonBuffer;
-      deserializeJson(jsonBuffer, payload);
-      const char* datetime = jsonBuffer["utc_datetime"];
-      return String(datetime);
-    } else {
-      http.end();
-      Serial.println("Error on HTTP request");
-      return "";
-    }
-  } else {
-    Serial.println("WiFi not connected");
-    return "";
-  }
-}
+// NTP Client setup
+WiFiUDP ntpUDP;
+NTPClient timeClient(ntpUDP, "pool.ntp.org", 0, 60000);  // NTP server, offset in seconds, update interval in ms
 
 // Function to fetch the crop threshold value from Firebase
 bool fetchCropThreshold() {
+  Serial.println("Fetching crop threshold from Firebase...");
   if (Firebase.getInt(firebaseData, "/selectedCrop/value")) {
     if (firebaseData.dataType() == "int") {
       cropThreshold = firebaseData.intData();
-      Serial.print("Crop threshold value: ");
+      Serial.print("Fetched crop threshold: ");
       Serial.println(cropThreshold);
       return true;
     } else {
-      Serial.println("Failed to get integer data type from Firebase");
-      return false;
+      Serial.print("Unexpected data type: ");
+      Serial.println(firebaseData.dataType());
     }
   } else {
-    Serial.print("Error getting crop threshold value: ");
+    Serial.print("Error fetching crop threshold: ");
     Serial.println(firebaseData.errorReason());
-    return false;
   }
+  return false;
 }
 
 void setup() {
-  // Initialize serial communication
   Serial.begin(19200);
 
   // Connect to Wi-Fi
@@ -87,59 +65,65 @@ void setup() {
     Serial.print(".");
   }
   Serial.println();
-  Serial.print("Connected to Wi-Fi. IP Address: ");
-  Serial.println(WiFi.localIP());
+  Serial.println("Connected to Wi-Fi");
 
   // Configure Firebase
   config.host = FIREBASE_HOST;
   config.signer.tokens.legacy_token = FIREBASE_AUTH;
 
   // Initialize Firebase
+  Serial.println("Initializing Firebase...");
   Firebase.begin(&config, &auth);
   Firebase.reconnectWiFi(true);
+
+  if (Firebase.ready()) {
+    Serial.println("Firebase connection successful");
+  } else {
+    Serial.println("Failed to connect to Firebase");
+  }
 
   // Configure the moisture sensor pin as an input
   pinMode(MOISTURE_SENSOR_PIN, INPUT);
 
   // Configure the relay pin as an output
   pinMode(RELAY_PIN, OUTPUT);
-  digitalWrite(RELAY_PIN, LOW); // Ensure the relay is off initially
+  digitalWrite(RELAY_PIN, LOW); 
 
   // Fetch the crop threshold value from Firebase
   while (!fetchCropThreshold()) {
     Serial.println("Retrying to fetch crop threshold...");
     delay(2000);
   }
+
+  // Initialize NTP Client
+  timeClient.begin();
 }
 
 void loop() {
+  // Update NTP client
+  timeClient.update();
+
   // Read the value from the moisture sensor
   int sensorValue = analogRead(MOISTURE_SENSOR_PIN);
-
-  // Map the sensor value to a percentage (0 to 100%)
   int moisturePercentage = map(sensorValue, ADC_MIN, ADC_MAX, 100, 0);
-
-  // Constrain the percentage to be within 0 to 100
   moisturePercentage = constrain(moisturePercentage, 0, 100);
 
-  // Print the moisture percentage to the serial monitor
+  // Log moisture percentage for debugging
   Serial.print("Moisture Level: ");
   Serial.print(moisturePercentage);
   Serial.println("%");
 
   // Control the relay based on the moisture level and crop threshold
   if (moisturePercentage < cropThreshold) {
-    digitalWrite(RELAY_PIN, HIGH); // Turn on the relay
+    digitalWrite(RELAY_PIN, LOW); 
     Serial.println("Relay ON: Irrigation system activated");
   } else {
-    digitalWrite(RELAY_PIN, LOW); // Turn off the relay
+    digitalWrite(RELAY_PIN, HIGH); 
     Serial.println("Relay OFF: Irrigation system deactivated");
   }
 
-  // Get the current timestamp from the World Time API
-  String timestamp = getCurrentTime();
-
-  // Log the timestamp for debugging
+  // Get the current timestamp
+  String timestamp = timeClient.getFormattedTime();
   Serial.print("Timestamp: ");
   Serial.println(timestamp);
 
@@ -155,10 +139,8 @@ void loop() {
   } else {
     Serial.print("Error sending data: ");
     Serial.println(firebaseData.errorReason());
-    Serial.print("HTTP response code: ");
-    Serial.println(firebaseData.httpCode());
   }
 
   // Add a delay before the next reading
-  delay(10000); // Delay increased to 10 seconds for less frequent updates
+  delay(10000); 
 }
