@@ -2,7 +2,6 @@
 #include <FirebaseESP32.h>
 #include <NTPClient.h>
 #include <WiFiUdp.h>
-#include <ArduinoJson.h>
 
 // Define the pins
 #define MOISTURE_SENSOR_PIN 34
@@ -22,6 +21,7 @@ const char* password = "12345678";
 
 // Create a Firebase Data object
 FirebaseData firebaseData;
+FirebaseData streamData;
 
 // Create FirebaseConfig and FirebaseAuth objects
 FirebaseConfig config;
@@ -34,24 +34,28 @@ int cropThreshold = -1;
 WiFiUDP ntpUDP;
 NTPClient timeClient(ntpUDP, "pool.ntp.org", 0, 60000);  // NTP server, offset in seconds, update interval in ms
 
-// Function to fetch the crop threshold value from Firebase
-bool fetchCropThreshold() {
-  Serial.println("Fetching crop threshold from Firebase...");
-  if (Firebase.getInt(firebaseData, "/selectedCrop/value")) {
-    if (firebaseData.dataType() == "int") {
-      cropThreshold = firebaseData.intData();
-      Serial.print("Fetched crop threshold: ");
-      Serial.println(cropThreshold);
-      return true;
-    } else {
-      Serial.print("Unexpected data type: ");
-      Serial.println(firebaseData.dataType());
-    }
+// Callback function to handle Firebase stream
+void streamCallback(StreamData data) {
+  Serial.println("Stream callback triggered");
+  Serial.print("Data path: ");
+  Serial.println(data.dataPath());
+  Serial.print("Data type: ");
+  Serial.println(data.dataType());
+
+  if (data.dataType() == "int") {
+    cropThreshold = data.intData();
+    Serial.print("Updated crop threshold: ");
+    Serial.println(cropThreshold);
   } else {
-    Serial.print("Error fetching crop threshold: ");
-    Serial.println(firebaseData.errorReason());
+    Serial.println("Received data is not an integer");
   }
-  return false;
+}
+
+void streamTimeoutCallback(bool timeout) {
+  if (timeout) {
+    Serial.println("Stream timed out, resuming...");
+    Firebase.readStream(streamData);
+  }
 }
 
 void setup() {
@@ -59,13 +63,12 @@ void setup() {
 
   // Connect to Wi-Fi
   WiFi.begin(ssid, password);
-  Serial.print("Connecting to Wi-Fi");
+  Serial.print("Connecting to WiFi");
   while (WiFi.status() != WL_CONNECTED) {
-    delay(1000);
+    delay(500);
     Serial.print(".");
   }
-  Serial.println();
-  Serial.println("Connected to Wi-Fi");
+  Serial.println("Connected to WiFi");
 
   // Configure Firebase
   config.host = FIREBASE_HOST;
@@ -87,12 +90,16 @@ void setup() {
 
   // Configure the relay pin as an output
   pinMode(RELAY_PIN, OUTPUT);
-  digitalWrite(RELAY_PIN, LOW); 
+  digitalWrite(RELAY_PIN, HIGH); // Ensure relay is off initially
 
-  // Fetch the crop threshold value from Firebase
-  while (!fetchCropThreshold()) {
-    Serial.println("Retrying to fetch crop threshold...");
-    delay(2000);
+  // Start listening to changes in crop threshold
+  Serial.println("Setting up Firebase stream...");
+  if (Firebase.beginStream(streamData, "/selectedCrop/value")) {
+    Firebase.setStreamCallback(streamData, streamCallback, streamTimeoutCallback);
+    Serial.println("Firebase stream started");
+  } else {
+    Serial.print("Failed to start stream: ");
+    Serial.println(streamData.errorReason());
   }
 
   // Initialize NTP Client
@@ -108,10 +115,13 @@ void loop() {
   int moisturePercentage = map(sensorValue, ADC_MIN, ADC_MAX, 100, 0);
   moisturePercentage = constrain(moisturePercentage, 0, 100);
 
-  // Log moisture percentage for debugging
+  // Log moisture percentage and crop threshold for debugging
   Serial.print("Moisture Level: ");
   Serial.print(moisturePercentage);
   Serial.println("%");
+
+  Serial.print("Crop Threshold: ");
+  Serial.println(cropThreshold);
 
   // Control the relay based on the moisture level and crop threshold
   if (moisturePercentage < cropThreshold) {
@@ -121,6 +131,10 @@ void loop() {
     digitalWrite(RELAY_PIN, HIGH); 
     Serial.println("Relay OFF: Irrigation system deactivated");
   }
+
+  // Confirm the relay pin state
+  Serial.print("Relay Pin State: ");
+  Serial.println(digitalRead(RELAY_PIN) == LOW ? "ON" : "OFF");
 
   // Get the current timestamp
   String timestamp = timeClient.getFormattedTime();
@@ -139,6 +153,12 @@ void loop() {
   } else {
     Serial.print("Error sending data: ");
     Serial.println(firebaseData.errorReason());
+  }
+
+  // Periodically read from the Firebase stream to keep it active
+  if (!Firebase.readStream(streamData)) {
+    Serial.print("Stream read error: ");
+    Serial.println(streamData.errorReason());
   }
 
   // Add a delay before the next reading
