@@ -1,74 +1,95 @@
-#include <Wire.h>
-#include <LiquidCrystal_I2C.h>
+#include <Arduino.h>
 #include <WiFi.h>
-#include <ESPAsyncWebServer.h>
-#include <ArduinoJson.h> // Include ArduinoJson library
+#include <FirebaseESP32.h>
 
-// Pin definitions for the ESP32
-const int moistureSensorPin = 34; // Analog pin for the moisture sensor
+// Define the pin where the moisture sensor is connected
+#define MOISTURE_SENSOR_PIN 34
+
+// Define the range of ADC values for dry and wet soil
+#define ADC_MIN 0        // ADC value for dry soil (adjust according to your sensor)
+#define ADC_MAX 4095     // ADC value for wet soil (adjust according to your sensor)
 
 // Replace with your network credentials
 const char* ssid = "iope";
-const char* password = "123456789/";
+const char* password = "12345678";
 
-// Initialize the I2C LCD
-LiquidCrystal_I2C lcd(0x27, 16, 2); // Set the LCD address to 0x27 for a 16x2 display
+// Replace with your Firebase project credentials
+#define FIREBASE_HOST "automated-irrigation-sys-4d93e-default-rtdb.firebaseio.com"
+#define FIREBASE_AUTH "AIzaSyDOVwK152RR46LB3H5zh6jbqmsG___dh2o"
 
-// Initialize the web server
-AsyncWebServer server(80);
+// Create a Firebase Data object
+FirebaseData firebaseData;
 
-// Variable to store the moisture percentage
-int moisturePercentage = 0;
+// Create FirebaseConfig and FirebaseAuth objects
+FirebaseConfig config;
+FirebaseAuth auth;
 
 void setup() {
-  Wire.begin(21, 22); // Initialize I2C communication with GPIO 21 (SDA) and GPIO 22 (SCL)
-  Serial.begin(9600); // Initialize serial communication
-  lcd.init(); // Initialize the LCD
-  lcd.backlight(); // Turn on the backlight
-  lcd.setCursor(0, 0);
-  lcd.print("Moisture Sensor:");
+  // Initialize serial communication
+  Serial.begin(19200);
 
   // Connect to Wi-Fi
   WiFi.begin(ssid, password);
+  Serial.print("Connecting to Wi-Fi");
   while (WiFi.status() != WL_CONNECTED) {
     delay(1000);
-    Serial.println("Connecting to WiFi...");
+    Serial.print(".");
   }
-  Serial.println("Connected to WiFi");
-  Serial.print("IP Address: ");
+  Serial.println();
+  Serial.print("Connected to Wi-Fi. IP Address: ");
   Serial.println(WiFi.localIP());
 
-  // Route to display moisture data
-  server.on("/api/moisture", HTTP_GET, [](AsyncWebServerRequest *request){
-    DynamicJsonDocument doc(1024);
-    doc["moisture"] = moisturePercentage;
-    String jsonString;
-    serializeJson(doc, jsonString);
-    request->send(200, "application/json", jsonString); // Moved the closing parenthesis and semicolon here
-  });
+  // Configure Firebase
+  config.host = FIREBASE_HOST;
+  config.signer.tokens.legacy_token = FIREBASE_AUTH;
 
-  // Start server
-  server.begin();
+  // Initialize Firebase
+  Firebase.begin(&config, &auth);
+  Firebase.reconnectWiFi(true);
+
+  // Configure the moisture sensor pin as an input
+  pinMode(MOISTURE_SENSOR_PIN, INPUT);
+
+  // Initialize time (required for timestamp)
+  configTime(0, 0, "pool.ntp.org", "time.nist.gov");
 }
 
 void loop() {
-  // Read moisture value
-  int moistureValue = analogRead(moistureSensorPin);
+  // Read the value from the moisture sensor
+  int sensorValue = analogRead(MOISTURE_SENSOR_PIN);
 
-  // Map the moisture value to a percentage (assuming a full range of 0-4095 for ESP32)
-  moisturePercentage = map(moistureValue, 4095, 0, 0, 100);
+  // Map the sensor value to a percentage (0 to 100%)
+  int moisturePercentage = map(sensorValue, ADC_MIN, ADC_MAX, 100, 0);
 
-  // Display the moisture percentage on the LCD
-  lcd.setCursor(0, 1);
-  lcd.print("Moisture: ");
-  lcd.print(moisturePercentage);
-  lcd.print("%");
+  // Constrain the percentage to be within 0 to 100
+  moisturePercentage = constrain(moisturePercentage, 0, 100);
 
-  // Print the moisture percentage to the Serial Monitor
-  Serial.print("Moisture Percentage: ");
+  // Print the moisture percentage to the serial monitor
+  Serial.print("Moisture Level: ");
   Serial.print(moisturePercentage);
   Serial.println("%");
 
-  // Delay before next reading
-  delay(1000);
+  // Get the current timestamp
+  time_t now = time(nullptr);
+  struct tm* p_tm = gmtime(&now);
+  char buffer[20];
+  strftime(buffer, 20, "%Y-%m-%dT%H:%M:%SZ", p_tm);
+  String timestamp = String(buffer);
+
+  // Create a JSON object with the sensor data
+  FirebaseJson json;
+  json.set("/value", moisturePercentage);
+  json.set("/timestamp", timestamp);
+
+  // Send data to Firebase
+  String path = "/sensors/sensorId1/data/" + String(millis());
+  if (Firebase.setJSON(firebaseData, path.c_str(), json)) {
+    Serial.println("Data sent to Firebase successfully");
+  } else {
+    Serial.print("Error sending data: ");
+    Serial.println(firebaseData.errorReason());
+  }
+
+  // Add a delay before the next reading
+  delay(10000); // Delay increased to 10 seconds for less frequent updates
 }
